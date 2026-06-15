@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Codex Traffic Board</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main id="app" aria-live="polite">
+      <section class="board is-loading">
+        <article class="signal signal-yellow">
+          <div class="signal-copy">
+            <p class="kicker">CONNECTING</p>
+            <h1>读取 Codex 状态</h1>
+            <p>正在连接本机状态源。</p>
+          </div>
+        </article>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

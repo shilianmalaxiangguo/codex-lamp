@@ -11,6 +11,8 @@ let yellowCount;
 let greenCount;
 let clockElement;
 let clockTimer;
+let signalState;
+let signalTimer;
 
 load();
 setInterval(load, 2000);
@@ -52,7 +54,13 @@ function render(data) {
     cwd: '',
     ageMs: null
   };
-  renderSignal(signalItem, { ...thread, light: primaryLight });
+  const previousSignalHtml = signalItem?.innerHTML;
+  const previousSignalClassName = signalItem?.className;
+  updateSignalState({ ...thread, light: primaryLight });
+  if (shouldRenderSignal(previousSignalHtml, previousSignalClassName)) {
+    renderSignal(signalItem);
+  }
+  syncSignalTimer();
   redCount.textContent = `RED ${data.counts.red}`;
   yellowCount.textContent = `YELLOW ${data.counts.yellow}`;
   greenCount.textContent = `GREEN ${data.counts.green}`;
@@ -91,11 +99,50 @@ function primaryStatusLight(data) {
   return 'green';
 }
 
-function renderSignal(item, thread) {
+function updateSignalState(thread) {
+  const now = Date.now();
+  const wasRed = signalState?.light === 'red';
+  const incomingAgeMs = Number.isFinite(thread.ageMs) ? thread.ageMs : null;
+  const startedAtMs = thread.light === 'red' ? (wasRed ? signalState.startedAtMs : now) : null;
+  const ageMs =
+    thread.light === 'red'
+      ? wasRed
+        ? currentSignalAgeMs(now)
+        : 0
+      : incomingAgeMs;
+  const displayAgeMs =
+    thread.light === 'red' ? (wasRed ? signalState.displayAgeMs ?? ageMs : 0) : ageMs;
+
+  signalState = {
+    ...thread,
+    baseAgeMs: ageMs,
+    baseAtMs: now,
+    displayAgeMs,
+    startedAtMs
+  };
+}
+
+function currentSignalAgeMs(now = Date.now()) {
+  if (!signalState || signalState.baseAgeMs === null) return null;
+  return Math.max(0, signalState.baseAgeMs + now - signalState.baseAtMs);
+}
+
+function shouldRenderSignal(previousHtml, previousClassName) {
+  if (!signalState) return false;
+  if (signalState.light !== 'red') return true;
+  if (previousClassName !== `signal signal-${signalState.light}`) return true;
+  return !previousHtml;
+}
+
+function renderSignal(item) {
+  const thread = signalState;
+  if (!thread || !item) return;
+
   item.className = `signal signal-${thread.light}`;
 
   const label = lightText[thread.light] ?? thread.light;
-  const age = thread.ageMs === null ? 'READY' : `${Math.round(thread.ageMs / 1000)}s`;
+  const ageMs = thread.displayAgeMs ?? currentSignalAgeMs();
+  const age = ageMs === null ? 'READY' : formatDuration(ageMs);
   item.innerHTML = `
     <div class="signal-copy">
       <p class="kicker">${escapeHtml(label)} · ${escapeHtml(age)}</p>
@@ -105,9 +152,54 @@ function renderSignal(item, thread) {
   `;
 }
 
+function formatDuration(valueMs) {
+  const totalSeconds = Math.floor(valueMs / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
 function formatTime(value) {
   const date = new Date(value);
   return date.toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+function syncSignalTimer() {
+  if (signalState?.light === 'red') {
+    startSignalTimer();
+    return;
+  }
+
+  stopSignalTimer();
+}
+
+function startSignalTimer() {
+  if (signalTimer) return;
+  signalTimer = setTimeout(tickSignal, nextSignalTickDelayMs());
+}
+
+function stopSignalTimer() {
+  if (!signalTimer) return;
+  clearTimeout(signalTimer);
+  signalTimer = undefined;
+}
+
+function tickSignal() {
+  signalTimer = undefined;
+  if (signalState?.light !== 'red') return;
+
+  signalState.displayAgeMs = currentSignalAgeMs();
+  renderSignal(signalItem);
+  startSignalTimer();
+}
+
+function nextSignalTickDelayMs(now = Date.now()) {
+  const startedAtMs = signalState?.startedAtMs ?? now;
+  const elapsedMs = Math.max(0, now - startedAtMs);
+  const remainderMs = elapsedMs % 1000;
+  return remainderMs === 0 ? 1000 : 1000 - remainderMs;
 }
 
 function updateClock() {

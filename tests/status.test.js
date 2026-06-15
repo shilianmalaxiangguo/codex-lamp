@@ -179,6 +179,179 @@ test('summary can use Codex thread list statuses directly', () => {
   assert.equal(summary.threads[0].preview, '2 个任务仍在运行');
 });
 
+test('official thread counts include active threads beyond the display limit', () => {
+  const summary = readCodexSnapshot({
+    now: 1_781_160_500_000,
+    recentLimit: 16,
+    officialThreads: [
+      ...Array.from({ length: 16 }, (_, index) => ({
+        id: `idle-${index}`,
+        title: `Idle ${index}`,
+        cwd: 'D:\\work',
+        status: 'idle',
+        updatedAt: 1_781_160_000_000 - index
+      })),
+      {
+        id: 'running-after-limit',
+        title: 'Running after limit',
+        cwd: 'D:\\work',
+        status: 'active',
+        updatedAt: 1_781_160_100_000
+      }
+    ]
+  });
+
+  assert.deepEqual(summary.counts, { red: 1, yellow: 0, green: 0 });
+  assert.equal(summary.threads[0].id, 'global-status');
+});
+
+test('fallback thread counts include active rollouts beyond the display limit', () => {
+  const dir = join(tmpdir(), `codex-traffic-board-fallback-beyond-limit-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const dbPath = join(dir, 'state.sqlite');
+  const sessionIndexPath = join(dir, 'session_index.jsonl');
+  const globalStatePath = join(dir, 'global-state.json');
+  const rolloutPath = join(dir, 'rollout-active-after-limit.jsonl');
+  const db = new DatabaseSync(dbPath);
+
+  db.exec(`
+    create table threads (
+      id text primary key,
+      title text not null,
+      preview text not null default '',
+      cwd text not null,
+      rollout_path text,
+      updated_at integer not null,
+      updated_at_ms integer,
+      archived integer not null default 0,
+      thread_source text
+    );
+    create table thread_spawn_edges (
+      parent_thread_id text not null,
+      child_thread_id text not null primary key,
+      status text not null
+    );
+  `);
+  const insert = db.prepare(
+    `insert into threads
+     (id, title, preview, cwd, rollout_path, updated_at, updated_at_ms, archived, thread_source)
+     values (?, ?, '', ?, ?, ?, ?, 0, ?)`
+  );
+  for (let index = 0; index < 16; index += 1) {
+    insert.run(
+      `newer-idle-${index}`,
+      `Newer idle ${index}`,
+      'D:\\work',
+      null,
+      1_781_160_500 - index,
+      1_781_160_500_000 - index,
+      'user'
+    );
+  }
+  insert.run(
+    'older-active-rollout',
+    'Older active rollout',
+    'D:\\work',
+    rolloutPath,
+    1_781_160_400,
+    1_781_160_400_000,
+    'user'
+  );
+  db.close();
+  writeFileSync(
+    rolloutPath,
+    `${JSON.stringify({
+      timestamp: '2026-06-15T08:59:50.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_started', turn_id: 'turn-1', started_at: 1_781_160_590 }
+    })}\n`,
+    'utf8'
+  );
+  writeFileSync(sessionIndexPath, '', 'utf8');
+  writeFileSync(globalStatePath, '{}', 'utf8');
+
+  const summary = readCodexSnapshot({
+    now: 1_781_160_600_000,
+    stateDbPath: dbPath,
+    sessionIndexPath,
+    globalStatePath,
+    recentLimit: 16
+  });
+
+  assert.deepEqual(summary.counts, { red: 1, yellow: 0, green: 0 });
+  assert.equal(summary.threads[0].id, 'global-status');
+});
+
+test('official thread age follows conversation state time instead of refresh time', () => {
+  let nowMs = 1_781_160_100_000;
+  const store = new CodexIpcThreadStore({
+    now: () => nowMs
+  });
+
+  store.applyMessage({
+    type: 'broadcast',
+    method: 'thread-stream-state-changed',
+    version: 7,
+    params: {
+      conversationId: 'refreshing-thread',
+      hostId: 'local',
+      change: {
+        type: 'snapshot',
+        revision: 1,
+        conversationState: {
+          id: 'refreshing-thread',
+          title: 'Refreshing thread',
+          cwd: 'D:\\work',
+          updatedAt: 1_781_160_000_000,
+          statusUpdatedAt: 1_781_160_090_000,
+          resumeState: 'resumed',
+          turns: [
+            {
+              status: 'inProgress',
+              items: []
+            }
+          ]
+        }
+      }
+    }
+  });
+
+  nowMs = 1_781_160_220_000;
+  store.applyMessage({
+    type: 'broadcast',
+    method: 'thread-stream-state-changed',
+    version: 7,
+    params: {
+      conversationId: 'refreshing-thread',
+      hostId: 'local',
+      change: {
+        type: 'snapshot',
+        revision: 2,
+        conversationState: {
+          id: 'refreshing-thread',
+          title: 'Refreshing thread',
+          cwd: 'D:\\work',
+          updatedAt: 1_781_160_000_000,
+          statusUpdatedAt: 1_781_160_200_000,
+          resumeState: 'resumed',
+          turns: [
+            {
+              status: 'inProgress',
+              items: []
+            }
+          ]
+        }
+      }
+    }
+  });
+
+  const summary = readCodexSnapshotFromProvider(() => store.getThreadSummaries(), {
+    now: 1_781_160_221_000
+  });
+
+  assert.equal(summary.threads[0].ageMs, 221_000);
+});
+
 test('IPC thread store snapshots provide official active counts', () => {
   const store = new CodexIpcThreadStore();
   store.applyMessage({
@@ -575,6 +748,11 @@ test('recent thread reader falls back to session index when sqlite is unavailabl
         id: 'older',
         thread_name: 'Older task',
         updated_at: '2026-06-10T01:00:00.000Z'
+      }),
+      JSON.stringify({
+        id: 'oldest',
+        thread_name: 'Oldest task',
+        updated_at: '2026-06-09T01:00:00.000Z'
       }),
       JSON.stringify({
         id: 'newer',
@@ -1512,5 +1690,93 @@ test('sqlite reader excludes spawned subagent threads from top-level task count'
   assert.deepEqual(
     threads.map((thread) => thread.id),
     ['parent']
+  );
+});
+
+test('sqlite reader still honors its explicit scan limit', () => {
+  const dir = join(tmpdir(), `codex-traffic-board-sqlite-limit-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const dbPath = join(dir, 'state.sqlite');
+  const db = new DatabaseSync(dbPath);
+
+  db.exec(`
+    create table threads (
+      id text primary key,
+      title text not null,
+      preview text not null default '',
+      cwd text not null,
+      rollout_path text,
+      updated_at integer not null,
+      updated_at_ms integer,
+      archived integer not null default 0,
+      thread_source text
+    );
+    create table thread_spawn_edges (
+      parent_thread_id text not null,
+      child_thread_id text not null primary key,
+      status text not null
+    );
+  `);
+  const insert = db.prepare(
+    `insert into threads
+     (id, title, preview, cwd, rollout_path, updated_at, updated_at_ms, archived, thread_source)
+     values (?, ?, '', ?, ?, ?, ?, 0, ?)`
+  );
+  insert.run('newer', 'Newer task', 'D:\\work', null, 101, 101_000, 'user');
+  insert.run('older', 'Older task', 'D:\\work', null, 100, 100_000, 'user');
+  db.close();
+
+  const threads = readRecentThreadsFromSqlite(dbPath, 1);
+
+  assert.deepEqual(
+    threads.map((thread) => thread.id),
+    ['newer']
+  );
+});
+
+test('recent thread helper honors recentLimit on sqlite source', () => {
+  const dir = join(tmpdir(), `codex-traffic-board-recent-limit-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const dbPath = join(dir, 'state.sqlite');
+  const sessionIndexPath = join(dir, 'session_index.jsonl');
+  const db = new DatabaseSync(dbPath);
+
+  db.exec(`
+    create table threads (
+      id text primary key,
+      title text not null,
+      preview text not null default '',
+      cwd text not null,
+      rollout_path text,
+      updated_at integer not null,
+      updated_at_ms integer,
+      archived integer not null default 0,
+      thread_source text
+    );
+    create table thread_spawn_edges (
+      parent_thread_id text not null,
+      child_thread_id text not null primary key,
+      status text not null
+    );
+  `);
+  const insert = db.prepare(
+    `insert into threads
+     (id, title, preview, cwd, rollout_path, updated_at, updated_at_ms, archived, thread_source)
+     values (?, ?, '', ?, ?, ?, ?, 0, ?)`
+  );
+  insert.run('newer', 'Newer task', 'D:\\work', null, 101, 101_000, 'user');
+  insert.run('older', 'Older task', 'D:\\work', null, 100, 100_000, 'user');
+  db.close();
+  writeFileSync(sessionIndexPath, '', 'utf8');
+
+  const threads = readRecentThreads({
+    stateDbPath: dbPath,
+    sessionIndexPath,
+    recentLimit: 1
+  });
+
+  assert.deepEqual(
+    threads.map((thread) => thread.id),
+    ['newer']
   );
 });

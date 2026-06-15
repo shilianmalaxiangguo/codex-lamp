@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
 import { homedir } from 'node:os';
@@ -9,6 +9,7 @@ export const DEFAULT_YELLOW_AFTER_MS = 90_000;
 export const DEFAULT_ACTIVE_WINDOW_MS = 10 * 60 * 1000;
 export const DEFAULT_MALFORMED_ACTIVE_WINDOW_MS = 10 * 60 * 1000;
 export const DEFAULT_UNFINISHED_ACTIVE_WINDOW_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_FALLBACK_SCAN_LIMIT = 256;
 export const CODEX_IPC_THREAD_STREAM_VERSION = 7;
 
 export function normalizeThread(
@@ -165,11 +166,12 @@ export function readCodexSnapshot(options = {}) {
   const yellowAfterMs = options.yellowAfterMs ?? DEFAULT_YELLOW_AFTER_MS;
   const hasOfficialThreads = Array.isArray(options.officialThreads);
   const recent = hasOfficialThreads
-    ? options.officialThreads.slice(0, recentLimit)
-    : readRecentThreads({
+    ? options.officialThreads
+    : readSnapshotCandidateThreads({
         stateDbPath,
         sessionIndexPath,
         recentLimit,
+        fallbackScanLimit: options.fallbackScanLimit,
         malformedActiveWindowMs,
         unfinishedActiveWindowMs
       });
@@ -373,7 +375,7 @@ export function readRecentThreads(options = {}) {
         options.unfinishedActiveWindowMs ?? DEFAULT_UNFINISHED_ACTIVE_WINDOW_MS
     });
   } catch {
-    return readSessionIndex(options.sessionIndexPath ?? defaultSessionIndexPath())
+    return readRecentSessionIndex(options.sessionIndexPath ?? defaultSessionIndexPath(), recentLimit)
       .map((thread) => ({
         id: thread.id,
         title: thread.thread_name,
@@ -384,6 +386,57 @@ export function readRecentThreads(options = {}) {
       .sort((a, b) => toMs(b.updatedAt) - toMs(a.updatedAt))
       .slice(0, recentLimit);
   }
+}
+
+function readRecentSessionIndex(path, limit) {
+  const maxLines = Math.max(0, limit);
+  if (maxLines === 0) return [];
+
+  const size = statSync(path).size;
+  if (size === 0) return [];
+
+  const fd = openSync(path, 'r');
+  try {
+    const chunks = [];
+    let position = size;
+    let lineCount = 0;
+
+    while (position > 0 && lineCount <= maxLines) {
+      const readSize = Math.min(64 * 1024, position);
+      position -= readSize;
+
+      const buffer = Buffer.allocUnsafe(readSize);
+      const bytesRead = readSync(fd, buffer, 0, readSize, position);
+      chunks.unshift(buffer.subarray(0, bytesRead));
+
+      lineCount = Buffer.concat(chunks)
+        .toString('utf8')
+        .split(/\r?\n/)
+        .filter(Boolean).length;
+    }
+
+    return Buffer.concat(chunks)
+      .toString('utf8')
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-maxLines)
+      .map((line) => JSON.parse(line));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function readSnapshotCandidateThreads(options = {}) {
+  const recentLimit = options.recentLimit ?? 16;
+  const fallbackScanLimit = Math.max(
+    recentLimit,
+    options.fallbackScanLimit ?? DEFAULT_FALLBACK_SCAN_LIMIT
+  );
+
+  return readRecentThreads({
+    ...options,
+    recentLimit: fallbackScanLimit
+  });
 }
 
 export function readRecentThreadsFromSqlite(path, limit = 16, options = {}) {
@@ -569,6 +622,9 @@ function newerTime(left, right) {
 
 function conversationStateToThreadSummary(state, receivedAtMs) {
   if (!state?.id) return null;
+  const stateUpdatedAtMs = toMs(
+    state.updatedAt ?? state.updated_at ?? state.statusUpdatedAt ?? state.status_updated_at
+  );
 
   return {
     id: state.id,
@@ -576,7 +632,7 @@ function conversationStateToThreadSummary(state, receivedAtMs) {
     preview: state.preview ?? '',
     cwd: cleanWindowsPath(state.cwd),
     status: conversationRuntimeStatus(state),
-    updatedAt: receivedAtMs
+    updatedAt: stateUpdatedAtMs ?? receivedAtMs
   };
 }
 

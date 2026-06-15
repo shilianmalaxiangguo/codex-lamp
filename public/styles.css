@@ -100,6 +100,7 @@ body.status-green {
   color: #fffaf0;
   font-size: clamp(12px, 1.5vw, 18px);
   font-weight: 800;
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0;
   text-shadow: 0 2px 12px rgba(0, 0, 0, 0.46);
 }

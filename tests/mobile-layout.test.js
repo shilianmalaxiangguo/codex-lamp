@@ -72,6 +72,13 @@ test('bottom indicator clears mobile browser navigation bars', () => {
   assert.match(css, /\.meta-strip span\s*\{[^}]*padding:\s*6px 10px/s);
 });
 
+test('bottom metadata uses subdued frosted-glass chips', () => {
+  assert.match(css, /\.meta-strip span\s*\{[^}]*display:\s*inline-flex/s);
+  assert.match(css, /\.meta-strip span\s*\{[^}]*background:\s*rgba\(0,\s*0,\s*0,\s*0\.18\)/s);
+  assert.match(css, /\.meta-strip span\s*\{[^}]*backdrop-filter:\s*blur\(14px\)\s*saturate\(160%\)/s);
+  assert.doesNotMatch(css, /\[data-clock\]::before/);
+});
+
 test('status polling does not reset the clock between ticks', async () => {
   const realDate = Date;
   const realDocument = globalThis.document;
